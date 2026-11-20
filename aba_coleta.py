@@ -1,3 +1,4 @@
+from datetime import datetime
 import pandas as pd
 import streamlit as st
 from streamlit_qrcode_scanner import qrcode_scanner
@@ -82,10 +83,22 @@ def renderizar_aba_coleta():
                 st.session_state.codigo_atual = None
                 st.rerun()
 
-    # 6. Tabela dos itens já salvos
+    # 6. Tabela dos itens já salvos + Exportação CSV
     if st.session_state.itens_coletados:
         st.subheader(f"Itens Monitorados ({len(st.session_state.itens_coletados)})")
-        st.dataframe(
-            pd.DataFrame(list(st.session_state.itens_coletados.values())),
+        df_coletados = pd.DataFrame(list(st.session_state.itens_coletados.values()))
+        st.dataframe(df_coletados, use_container_width=True)
+
+        # Prepara o CSV com separador ';' e codificação UTF-8-SIG (abre perfeito no Excel)
+        csv_bytes = df_coletados.to_csv(index=False, sep=";").encode("utf-8-sig")
+        data_hoje = datetime.now().strftime("%Y-%m-%d_%H-%M")
+        nome_arquivo = f"inventario_coleta_{data_hoje}.csv"
+
+        st.download_button(
+            label="📥 Baixar Planilha da Coleta (.CSV)",
+            data=csv_bytes,
+            file_name=nome_arquivo,
+            mime="text/csv",
+            type="primary",
             use_container_width=True,
         )
