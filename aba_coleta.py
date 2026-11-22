@@ -3,8 +3,38 @@ from google import genai
 from PIL import Image
 import pandas as pd
 import streamlit as st
+import streamlit.components.v1 as components
 from streamlit_qrcode_scanner import qrcode_scanner
 from api_produtos import buscar_dados_mestres
+
+
+def desligar_cameras_android():
+    """Força o Chrome no Android a encerrar qualquer stream de vídeo ativo em memória."""
+    js_stop = """
+    <script>
+    (function() {
+        function stopAllTracks(doc) {
+            if (!doc) return;
+            const videos = doc.querySelectorAll('video');
+            videos.forEach(v => {
+                if (v.srcObject) {
+                    v.srcObject.getTracks().forEach(track => track.stop());
+                    v.srcObject = null;
+                }
+            });
+        }
+        stopAllTracks(document);
+        try {
+            stopAllTracks(window.parent.document);
+            const iframes = window.parent.document.querySelectorAll('iframe');
+            iframes.forEach(ifr => {
+                try { stopAllTracks(ifr.contentDocument); } catch (e) {}
+            });
+        } catch (e) {}
+    })();
+    </script>
+    """
+    components.html(js_stop, height=0, width=0)
 
 
 def contar_itens_nas_fotos(lista_fotos, nome_produto):
@@ -78,20 +108,22 @@ def renderizar_aba_coleta():
 
     # 2. Captura do código conforme a escolha
     if modo_entrada == "Celular (Câmera)":
-        # Só renderiza o scanner se não houver item selecionado E o scanner estiver ativo
         if st.session_state.codigo_atual is None and st.session_state.scanner_ativo:
             st.caption("Aponte a câmera para o código de barras ou QR Code.")
-            # A key dinâmica força o componente a destruir e liberar a câmera ao mudar
             valor_scanner = qrcode_scanner(key=f"scanner_mvp_{st.session_state.scanner_iteracao}")
             if valor_scanner and valor_scanner != st.session_state.ultimo_codigo_scanner:
                 st.session_state.ultimo_codigo_scanner = valor_scanner
                 codigo_lido = valor_scanner
-        elif st.session_state.codigo_atual is None:
-            if st.button("📷 Ligar Câmera para Bipar Novo Item", use_container_width=True):
-                st.session_state.scanner_ativo = True
-                st.session_state.scanner_iteracao += 1
-                st.rerun()
+        else:
+            # Garante que o Chrome no Android solte a lente da câmera
+            desligar_cameras_android()
+            if st.session_state.codigo_atual is None:
+                if st.button("📷 Ligar Câmera para Bipar Novo Item", use_container_width=True):
+                    st.session_state.scanner_ativo = True
+                    st.session_state.scanner_iteracao += 1
+                    st.rerun()
     else:
+        desligar_cameras_android()
         with st.form("form_busca_manual", clear_on_submit=True):
             c_input, c_btn = st.columns([3, 1])
             sku_digitado = c_input.text_input(
@@ -146,17 +178,19 @@ def renderizar_aba_coleta():
             st.session_state.scanner_ativo = False
             st.rerun()
 
-        # Painel de captura via câmera nativa do celular
+        # Painel de captura via câmera nativa do Android
         if st.session_state.modo_foto_inventario:
+            desligar_cameras_android()
             with st.container(border=True):
                 st.markdown("#### Contagem Visual do Estoque")
                 st.caption(
-                    "Toque abaixo em 'Browse files' para abrir a câmera do celular e tirar fotos das prateleiras/caixas deste produto."
+                    "Toque em 'Browse files' abaixo e escolha 'Câmera' no menu do Android para fotografar o estoque."
                 )
 
+                # Usar apenas png/jpg/jpeg faz o Android Chrome exibir o atalho direto da Câmera
                 fotos_selecionadas = st.file_uploader(
-                    "Tirar fotos ou selecionar imagens",
-                    type=["jpg", "jpeg", "png", "webp"],
+                    "Tirar fotos com a câmera do Android",
+                    type=["jpg", "jpeg", "png"],
                     accept_multiple_files=True,
                     key=f"uploader_item_{st.session_state.codigo_atual}",
                 )
@@ -209,7 +243,6 @@ def renderizar_aba_coleta():
         df_coletados = pd.DataFrame(list(st.session_state.itens_coletados.values()))
         st.dataframe(df_coletados, use_container_width=True)
 
-        # Prepara o CSV com separador ';' e codificação UTF-8-SIG (abre perfeito no Excel)
         csv_bytes = df_coletados.to_csv(index=False, sep=";").encode("utf-8-sig")
         data_hoje = datetime.now().strftime("%Y-%m-%d_%H-%M")
         nome_arquivo = f"inventario_coleta_{data_hoje}.csv"
