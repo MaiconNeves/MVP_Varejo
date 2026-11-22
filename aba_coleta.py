@@ -47,10 +47,21 @@ def inicializar_estados():
         "modo_foto_inventario": False,
         "qtd_calculada_ia": 1.0,
         "scanner_ativo": True,
+        "scanner_iteracao": 0,
+        "ultimo_codigo_scanner": None,
     }
     for chave, valor in estados_padrao.items():
         if chave not in st.session_state:
             st.session_state[chave] = valor
+
+
+def resetar_para_nova_leitura():
+    """Limpa o item atual e prepara o scanner com uma nova key para a próxima bipagem."""
+    st.session_state.codigo_atual = None
+    st.session_state.qtd_calculada_ia = 1.0
+    st.session_state.modo_foto_inventario = False
+    st.session_state.scanner_ativo = True
+    st.session_state.scanner_iteracao += 1
 
 
 def renderizar_aba_coleta():
@@ -67,13 +78,18 @@ def renderizar_aba_coleta():
 
     # 2. Captura do código conforme a escolha
     if modo_entrada == "Celular (Câmera)":
-        # Só liga o scanner se não houver um produto em edição no momento
-        if not st.session_state.codigo_atual and st.session_state.scanner_ativo:
+        # Só renderiza o scanner se não houver item selecionado E o scanner estiver ativo
+        if st.session_state.codigo_atual is None and st.session_state.scanner_ativo:
             st.caption("Aponte a câmera para o código de barras ou QR Code.")
-            codigo_lido = qrcode_scanner(key="scanner_mvp")
-        elif not st.session_state.codigo_atual:
+            # A key dinâmica força o componente a destruir e liberar a câmera ao mudar
+            valor_scanner = qrcode_scanner(key=f"scanner_mvp_{st.session_state.scanner_iteracao}")
+            if valor_scanner and valor_scanner != st.session_state.ultimo_codigo_scanner:
+                st.session_state.ultimo_codigo_scanner = valor_scanner
+                codigo_lido = valor_scanner
+        elif st.session_state.codigo_atual is None:
             if st.button("📷 Ligar Câmera para Bipar Novo Item", use_container_width=True):
                 st.session_state.scanner_ativo = True
+                st.session_state.scanner_iteracao += 1
                 st.rerun()
     else:
         with st.form("form_busca_manual", clear_on_submit=True):
@@ -100,13 +116,14 @@ def renderizar_aba_coleta():
             )
             st.session_state.codigo_atual = None
             st.session_state.scanner_ativo = False
+            st.session_state.scanner_iteracao += 1
             st.rerun()
 
         elif ean_bipado != st.session_state.codigo_atual:
             st.session_state.aviso_duplicado = None
             st.session_state.codigo_atual = ean_bipado
-            # Desliga o scanner imediatamente para liberar o hardware da câmera
             st.session_state.scanner_ativo = False
+            st.session_state.scanner_iteracao += 1
             st.session_state.modo_foto_inventario = False
             st.session_state.qtd_calculada_ia = 1.0
             with st.spinner("Buscando dados mestres..."):
@@ -126,13 +143,15 @@ def renderizar_aba_coleta():
         # Botão para ativar a contagem por fotos
         if st.button("📸 Gerar Inventário do Item (Contar por Fotos)", use_container_width=True):
             st.session_state.modo_foto_inventario = not st.session_state.modo_foto_inventario
+            st.session_state.scanner_ativo = False
+            st.rerun()
 
         # Painel de captura via câmera nativa do celular
         if st.session_state.modo_foto_inventario:
             with st.container(border=True):
                 st.markdown("#### Contagem Visual do Estoque")
                 st.caption(
-                    "Toque abaixo para abrir a câmera do celular e tirar uma ou mais fotos das prateleiras/caixas deste produto."
+                    "Toque abaixo em 'Browse files' para abrir a câmera do celular e tirar fotos das prateleiras/caixas deste produto."
                 )
 
                 fotos_selecionadas = st.file_uploader(
@@ -177,16 +196,11 @@ def renderizar_aba_coleta():
                     "Marca": marca,
                     "Qtd Física": quantidade,
                 }
-                st.session_state.codigo_atual = None
-                st.session_state.qtd_calculada_ia = 1.0
-                st.session_state.scanner_ativo = True
+                resetar_para_nova_leitura()
                 st.rerun()
 
             if b2.form_submit_button("Cancelar", use_container_width=True):
-                st.session_state.codigo_atual = None
-                st.session_state.qtd_calculada_ia = 1.0
-                st.session_state.modo_foto_inventario = False
-                st.session_state.scanner_ativo = True
+                resetar_para_nova_leitura()
                 st.rerun()
 
     # 6. Tabela dos itens já salvos + Exportação CSV
