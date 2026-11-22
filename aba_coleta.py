@@ -31,7 +31,6 @@ def contar_itens_nas_fotos(lista_fotos, nome_produto):
             model="gemini-2.5-flash",
             contents=[imagem, prompt],
         )
-        # Limpa qualquer texto extra e pega apenas os números
         digitos = "".join(filter(str.isdigit, resposta.text))
         total_contado += int(digitos) if digitos else 0
 
@@ -46,8 +45,8 @@ def inicializar_estados():
         "aviso_duplicado": None,
         "dados_api": {},
         "modo_foto_inventario": False,
-        "fotos_inventario": [],
         "qtd_calculada_ia": 1.0,
+        "scanner_ativo": True,
     }
     for chave, valor in estados_padrao.items():
         if chave not in st.session_state:
@@ -68,8 +67,14 @@ def renderizar_aba_coleta():
 
     # 2. Captura do código conforme a escolha
     if modo_entrada == "Celular (Câmera)":
-        st.caption("Aponte a câmera para o código de barras ou QR Code.")
-        codigo_lido = qrcode_scanner(key="scanner_mvp")
+        # Só liga o scanner se não houver um produto em edição no momento
+        if not st.session_state.codigo_atual and st.session_state.scanner_ativo:
+            st.caption("Aponte a câmera para o código de barras ou QR Code.")
+            codigo_lido = qrcode_scanner(key="scanner_mvp")
+        elif not st.session_state.codigo_atual:
+            if st.button("📷 Ligar Câmera para Bipar Novo Item", use_container_width=True):
+                st.session_state.scanner_ativo = True
+                st.rerun()
     else:
         with st.form("form_busca_manual", clear_on_submit=True):
             c_input, c_btn = st.columns([3, 1])
@@ -94,16 +99,19 @@ def renderizar_aba_coleta():
                 f" com saldo **{item_ex['Qtd Física']}**!"
             )
             st.session_state.codigo_atual = None
+            st.session_state.scanner_ativo = False
+            st.rerun()
 
         elif ean_bipado != st.session_state.codigo_atual:
             st.session_state.aviso_duplicado = None
             st.session_state.codigo_atual = ean_bipado
-            # Reseta estados de foto ao bipar um produto novo
+            # Desliga o scanner imediatamente para liberar o hardware da câmera
+            st.session_state.scanner_ativo = False
             st.session_state.modo_foto_inventario = False
-            st.session_state.fotos_inventario = []
             st.session_state.qtd_calculada_ia = 1.0
             with st.spinner("Buscando dados mestres..."):
                 st.session_state.dados_api = buscar_dados_mestres(ean_bipado)
+            st.rerun()
 
     # 4. Alerta caso o código já exista na lista
     if st.session_state.aviso_duplicado:
@@ -119,38 +127,30 @@ def renderizar_aba_coleta():
         if st.button("📸 Gerar Inventário do Item (Contar por Fotos)", use_container_width=True):
             st.session_state.modo_foto_inventario = not st.session_state.modo_foto_inventario
 
-        # Painel de captura de múltiplas fotos no celular
+        # Painel de captura via câmera nativa do celular
         if st.session_state.modo_foto_inventario:
             with st.container(border=True):
                 st.markdown("#### Contagem Visual do Estoque")
                 st.caption(
-                    "Tire a foto de uma prateleira/caixa, clique em Adicionar e repita até cobrir todo o estoque deste item."
+                    "Toque abaixo para abrir a câmera do celular e tirar uma ou mais fotos das prateleiras/caixas deste produto."
                 )
 
-                foto_atual = st.camera_input(
-                    "Câmera do Estoque",
-                    key=f"cam_item_{len(st.session_state.fotos_inventario)}",
+                fotos_selecionadas = st.file_uploader(
+                    "Tirar fotos ou selecionar imagens",
+                    type=["jpg", "jpeg", "png", "webp"],
+                    accept_multiple_files=True,
+                    key=f"uploader_item_{st.session_state.codigo_atual}",
                 )
 
-                c_add, c_limpar = st.columns(2)
-                if foto_atual and c_add.button("➕ Adicionar Foto", use_container_width=True):
-                    st.session_state.fotos_inventario.append(foto_atual)
-                    st.rerun()
+                if fotos_selecionadas:
+                    qtd_fotos = len(fotos_selecionadas)
+                    st.write(f"**{qtd_fotos} foto(s) pronta(s) para análise**")
 
-                if st.session_state.fotos_inventario and c_limpar.button("🗑️ Limpar Fotos", use_container_width=True):
-                    st.session_state.fotos_inventario = []
-                    st.rerun()
-
-                qtd_fotos = len(st.session_state.fotos_inventario)
-                st.write(f"**Fotos prontas para contagem:** {qtd_fotos}")
-
-                if qtd_fotos > 0:
                     if st.button("✅ Finalizar e Gerar Quantidade", type="primary", use_container_width=True):
                         with st.spinner(f"Analisando {qtd_fotos} foto(s) com Gemini..."):
                             nome_busca = desc_padrao if desc_padrao else st.session_state.codigo_atual
-                            total = contar_itens_nas_fotos(st.session_state.fotos_inventario, nome_busca)
+                            total = contar_itens_nas_fotos(fotos_selecionadas, nome_busca)
                             st.session_state.qtd_calculada_ia = float(total)
-                            st.session_state.fotos_inventario = []
                             st.session_state.modo_foto_inventario = False
                             st.success(f"Contagem concluída: **{total}** unidades!")
                             st.rerun()
@@ -179,13 +179,14 @@ def renderizar_aba_coleta():
                 }
                 st.session_state.codigo_atual = None
                 st.session_state.qtd_calculada_ia = 1.0
+                st.session_state.scanner_ativo = True
                 st.rerun()
 
             if b2.form_submit_button("Cancelar", use_container_width=True):
                 st.session_state.codigo_atual = None
                 st.session_state.qtd_calculada_ia = 1.0
-                st.session_state.fotos_inventario = []
                 st.session_state.modo_foto_inventario = False
+                st.session_state.scanner_ativo = True
                 st.rerun()
 
     # 6. Tabela dos itens já salvos + Exportação CSV
