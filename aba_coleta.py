@@ -1,5 +1,6 @@
 from datetime import datetime
 from google import genai
+from google.genai import errors
 from PIL import Image
 import pandas as pd
 import streamlit as st
@@ -38,11 +39,11 @@ def desligar_cameras_android():
 
 
 def contar_itens_nas_fotos(lista_fotos, nome_produto):
-    """Redimensiona as fotos para evitar estourar a memória e envia ao Gemini 2.5 Flash."""
-    api_key = st.secrets.get("GEMINI_API_KEY")
+    """Redimensiona as fotos e envia ao Gemini com fallback automático de modelo e tratamento de erro."""
+    api_key = st.secrets.get("GEMINI_API_KEY", "").strip()
     if not api_key:
         st.error("Chave GEMINI_API_KEY não encontrada nos Secrets do Streamlit.")
-        return 0
+        return None
 
     client = genai.Client(api_key=api_key)
     total_contado = 0
@@ -55,15 +56,41 @@ def contar_itens_nas_fotos(lista_fotos, nome_produto):
         f"Se não houver nenhuma unidade, responda 0."
     )
 
-    for foto_bytes in lista_fotos:
-        imagem = Image.open(foto_bytes)
-        # Redimensiona para no máximo 1600px mantendo a proporção (otimiza envio no 4G/Wi-Fi)
+    modelos_disponiveis = ["gemini-3.8-flash", "gemini-3.5-flash-lite", "gemini-2.5-flash"]
+
+    for idx, foto_bytes in enumerate(lista_fotos, start=1):
+        foto_bytes.seek(0)
+        imagem = Image.open(foto_bytes).convert("RGB")
         imagem.thumbnail((1600, 1600))
-        resposta = client.models.generate_content(
-            model="gemini-2.5-flash",
-            contents=[imagem, prompt],
-        )
-        digitos = "".join(filter(str.isdigit, resposta.text))
+
+        resposta = None
+        ultimo_erro = None
+
+        for modelo in modelos_disponiveis:
+            try:
+                resposta = client.models.generate_content(
+                    model=modelo,
+                    contents=[imagem, prompt],
+                )
+                break
+            except errors.ClientError as e:
+                ultimo_erro = e
+                # Se for erro de modelo não encontrado (404), tenta o próximo modelo da lista
+                if getattr(e, "code", None) == 404 or "NOT_FOUND" in str(e):
+                    continue
+                # Se for erro de chave inválida (400/403) ou cota excedida (429), exibe o motivo exato
+                st.error(f"Erro na API do Gemini (Foto {idx}): {e.message if hasattr(e, 'message') else str(e)}")
+                return None
+            except Exception as e:
+                st.error(f"Falha inesperada ao processar a foto {idx}: {str(e)}")
+                return None
+
+        if resposta is None:
+            st.error(f"Nenhum modelo Gemini respondeu para a foto {idx}. Detalhe: {ultimo_erro}")
+            return None
+
+        texto_resposta = resposta.text or ""
+        digitos = "".join(filter(str.isdigit, texto_resposta))
         total_contado += int(digitos) if digitos else 0
 
     return total_contado
@@ -197,7 +224,6 @@ def renderizar_aba_coleta():
                     qtd_fotos = len(fotos_selecionadas)
                     st.success(f"📎 **{qtd_fotos} foto(s) recebida(s)!**")
 
-                    # Mostra miniatura reduzida para confirmar que o Android entregou a imagem
                     cols_prev = st.columns(min(qtd_fotos, 3))
                     for idx, f_img in enumerate(fotos_selecionadas[:3]):
                         cols_prev[idx].image(f_img, use_container_width=True)
@@ -206,9 +232,10 @@ def renderizar_aba_coleta():
                         with st.spinner(f"Analisando {qtd_fotos} foto(s) com Gemini..."):
                             nome_busca = desc_padrao if desc_padrao else st.session_state.codigo_atual
                             total = contar_itens_nas_fotos(fotos_selecionadas, nome_busca)
-                            st.session_state.qtd_calculada_ia = float(total)
-                            st.session_state.modo_foto_inventario = False
-                            st.rerun()
+                            if total is not None:
+                                st.session_state.qtd_calculada_ia = float(total)
+                                st.session_state.modo_foto_inventario = False
+                                st.rerun()
 
         # Formulário principal (preenchido com o resultado da IA, mas editável manualmente)
         with st.form("form_estoque", clear_on_submit=True):
