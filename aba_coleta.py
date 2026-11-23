@@ -38,7 +38,7 @@ def desligar_cameras_android():
 
 
 def contar_itens_nas_fotos(lista_fotos, nome_produto):
-    """Envia cada foto para o Gemini 2.5 Flash e soma as unidades encontradas."""
+    """Redimensiona as fotos para evitar estourar a memória e envia ao Gemini 2.5 Flash."""
     api_key = st.secrets.get("GEMINI_API_KEY")
     if not api_key:
         st.error("Chave GEMINI_API_KEY não encontrada nos Secrets do Streamlit.")
@@ -57,6 +57,8 @@ def contar_itens_nas_fotos(lista_fotos, nome_produto):
 
     for foto_bytes in lista_fotos:
         imagem = Image.open(foto_bytes)
+        # Redimensiona para no máximo 1600px mantendo a proporção (otimiza envio no 4G/Wi-Fi)
+        imagem.thumbnail((1600, 1600))
         resposta = client.models.generate_content(
             model="gemini-2.5-flash",
             contents=[imagem, prompt],
@@ -115,7 +117,6 @@ def renderizar_aba_coleta():
                 st.session_state.ultimo_codigo_scanner = valor_scanner
                 codigo_lido = valor_scanner
         else:
-            # Garante que o Chrome no Android solte a lente da câmera
             desligar_cameras_android()
             if st.session_state.codigo_atual is None:
                 if st.button("📷 Ligar Câmera para Bipar Novo Item", use_container_width=True):
@@ -178,34 +179,35 @@ def renderizar_aba_coleta():
             st.session_state.scanner_ativo = False
             st.rerun()
 
-        # Painel de captura via câmera nativa do Android
+        # Painel de captura via câmera nativa do Android (Resistente a reload)
         if st.session_state.modo_foto_inventario:
             desligar_cameras_android()
             with st.container(border=True):
                 st.markdown("#### Contagem Visual do Estoque")
-                st.caption(
-                    "Toque em 'Browse files' abaixo e escolha 'Câmera' no menu do Android para fotografar o estoque."
-                )
+                st.caption("Tire uma foto por vez ou selecione várias fotos da galeria.")
 
-                # Usar apenas png/jpg/jpeg faz o Android Chrome exibir o atalho direto da Câmera
                 fotos_selecionadas = st.file_uploader(
-                    "Tirar fotos com a câmera do Android",
+                    "📷 Abrir Câmera ou Galeria",
                     type=["jpg", "jpeg", "png"],
                     accept_multiple_files=True,
-                    key=f"uploader_item_{st.session_state.codigo_atual}",
+                    key=f"uploader_{st.session_state.codigo_atual}",
                 )
 
                 if fotos_selecionadas:
                     qtd_fotos = len(fotos_selecionadas)
-                    st.write(f"**{qtd_fotos} foto(s) pronta(s) para análise**")
+                    st.success(f"📎 **{qtd_fotos} foto(s) recebida(s)!**")
 
-                    if st.button("✅ Finalizar e Gerar Quantidade", type="primary", use_container_width=True):
+                    # Mostra miniatura reduzida para confirmar que o Android entregou a imagem
+                    cols_prev = st.columns(min(qtd_fotos, 3))
+                    for idx, f_img in enumerate(fotos_selecionadas[:3]):
+                        cols_prev[idx].image(f_img, use_container_width=True)
+
+                    if st.button("✅ Contar Itens nas Fotos Agora", type="primary", use_container_width=True):
                         with st.spinner(f"Analisando {qtd_fotos} foto(s) com Gemini..."):
                             nome_busca = desc_padrao if desc_padrao else st.session_state.codigo_atual
                             total = contar_itens_nas_fotos(fotos_selecionadas, nome_busca)
                             st.session_state.qtd_calculada_ia = float(total)
                             st.session_state.modo_foto_inventario = False
-                            st.success(f"Contagem concluída: **{total}** unidades!")
                             st.rerun()
 
         # Formulário principal (preenchido com o resultado da IA, mas editável manualmente)
