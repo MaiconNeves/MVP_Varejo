@@ -10,11 +10,11 @@ from api_produtos import buscar_dados_mestres
 
 
 def desligar_cameras_android():
-    """Força o Chrome no Android a encerrar qualquer stream de vídeo ativo em memória."""
-    js_stop = """
-    <script>
-    (function() {
-        function stopAllTracks(doc) {
+    """Força o Chrome no Android a liberar a câmera física utilizada pelo scanner."""
+    components.html(
+        """
+        <script>
+        function pararTracks(doc) {
             if (!doc) return;
             const videos = doc.querySelectorAll('video');
             videos.forEach(v => {
@@ -24,29 +24,41 @@ def desligar_cameras_android():
                 }
             });
         }
-        stopAllTracks(document);
         try {
-            stopAllTracks(window.parent.document);
-            const iframes = window.parent.document.querySelectorAll('iframe');
-            iframes.forEach(ifr => {
-                try { stopAllTracks(ifr.contentDocument); } catch (e) {}
-            });
-        } catch (e) {}
-    })();
-    </script>
-    """
-    components.html(js_stop, height=0, width=0)
+            pararTracks(document);
+            if (window.parent && window.parent.document) {
+                pararTracks(window.parent.document);
+                const iframes = window.parent.document.querySelectorAll('iframe');
+                iframes.forEach(iframe => {
+                    try {
+                        pararTracks(iframe.contentDocument || iframe.contentWindow.document);
+                    } catch (e) {}
+                });
+            }
+        } catch (err) {}
+        </script>
+        """,
+        height=0,
+        width=0,
+    )
 
 
 def contar_itens_nas_fotos(lista_fotos, nome_produto):
-    """Redimensiona as fotos e envia ao Gemini com fallback automático de modelo e tratamento de erro."""
-    api_key = st.secrets.get("GEMINI_API_KEY", "").strip()
+    """Envia as fotos redimensionadas para o Gemini e soma as unidades identificadas."""
+    api_key = str(st.secrets.get("GEMINI_API_KEY", "")).strip()
     if not api_key:
         st.error("Chave GEMINI_API_KEY não encontrada nos Secrets do Streamlit.")
         return None
 
     client = genai.Client(api_key=api_key)
     total_contado = 0
+
+    # Modelos vigentes no Google AI Studio (com fallback automático)
+    modelos_disponiveis = [
+        "gemini-3.8-flash",
+        "gemini-3.5-flash-lite",
+        "gemini-4-hydrogen",
+    ]
 
     prompt = (
         f"Você é um auditor de inventário de estoque. Analise esta imagem e conte "
@@ -56,15 +68,17 @@ def contar_itens_nas_fotos(lista_fotos, nome_produto):
         f"Se não houver nenhuma unidade, responda 0."
     )
 
-    modelos_disponiveis = ["gemini-3.8-flash", "gemini-3.5-flash-lite", "gemini-2.5-flash"]
-
     for idx, foto_bytes in enumerate(lista_fotos, start=1):
-        foto_bytes.seek(0)
-        imagem = Image.open(foto_bytes).convert("RGB")
-        imagem.thumbnail((1600, 1600))
+        try:
+            foto_bytes.seek(0)
+            imagem = Image.open(foto_bytes).convert("RGB")
+            imagem.thumbnail((1600, 1600))
+        except Exception as e:
+            st.error(f"Não foi possível processar a imagem {idx}: {e}")
+            return None
 
         resposta = None
-        ultimo_erro = None
+        ultimo_erro_api = None
 
         for modelo in modelos_disponiveis:
             try:
@@ -74,23 +88,27 @@ def contar_itens_nas_fotos(lista_fotos, nome_produto):
                 )
                 break
             except errors.ClientError as e:
-                ultimo_erro = e
-                # Se for erro de modelo não encontrado (404), tenta o próximo modelo da lista
-                if getattr(e, "code", None) == 404 or "NOT_FOUND" in str(e):
-                    continue
-                # Se for erro de chave inválida (400/403) ou cota excedida (429), exibe o motivo exato
-                st.error(f"Erro na API do Gemini (Foto {idx}): {e.message if hasattr(e, 'message') else str(e)}")
-                return None
+                ultimo_erro_api = e
+                # Se for erro de chave inválida (400/403), interrompe imediatamente
+                if getattr(e, "code", None) in (400, 403):
+                    break
+                continue
             except Exception as e:
-                st.error(f"Falha inesperada ao processar a foto {idx}: {str(e)}")
-                return None
+                ultimo_erro_api = e
+                continue
 
         if resposta is None:
-            st.error(f"Nenhum modelo Gemini respondeu para a foto {idx}. Detalhe: {ultimo_erro}")
+            codigo_status = getattr(ultimo_erro_api, "code", "N/A")
+            mensagem_api = getattr(ultimo_erro_api, "message", str(ultimo_erro_api))
+            st.error(
+                f"Falha na API do Gemini (Código {codigo_status}): {mensagem_api}\n\n"
+                "Verifique nos Secrets do Streamlit se a GEMINI_API_KEY foi copiada sem espaços "
+                "e se a API está ativa no Google AI Studio."
+            )
             return None
 
-        texto_resposta = resposta.text or ""
-        digitos = "".join(filter(str.isdigit, texto_resposta))
+        texto_resp = (resposta.text or "").strip()
+        digitos = "".join(filter(str.isdigit, texto_resp))
         total_contado += int(digitos) if digitos else 0
 
     return total_contado
@@ -114,8 +132,8 @@ def inicializar_estados():
             st.session_state[chave] = valor
 
 
-def resetar_para_nova_leitura():
-    """Limpa o item atual e prepara o scanner com uma nova key para a próxima bipagem."""
+def resetar_para_proximo_item():
+    """Limpa o item atual e reativa o leitor para a próxima bipagem."""
     st.session_state.codigo_atual = None
     st.session_state.qtd_calculada_ia = 1.0
     st.session_state.modo_foto_inventario = False
@@ -137,19 +155,24 @@ def renderizar_aba_coleta():
 
     # 2. Captura do código conforme a escolha
     if modo_entrada == "Celular (Câmera)":
-        if st.session_state.codigo_atual is None and st.session_state.scanner_ativo:
+        if st.session_state.scanner_ativo and not st.session_state.codigo_atual:
             st.caption("Aponte a câmera para o código de barras ou QR Code.")
-            valor_scanner = qrcode_scanner(key=f"scanner_mvp_{st.session_state.scanner_iteracao}")
-            if valor_scanner and valor_scanner != st.session_state.ultimo_codigo_scanner:
-                st.session_state.ultimo_codigo_scanner = valor_scanner
-                codigo_lido = valor_scanner
+            leitura_bruta = qrcode_scanner(
+                key=f"scanner_mvp_{st.session_state.scanner_iteracao}"
+            )
+            if leitura_bruta and leitura_bruta != st.session_state.ultimo_codigo_scanner:
+                st.session_state.ultimo_codigo_scanner = leitura_bruta
+                codigo_lido = leitura_bruta
+                st.session_state.scanner_ativo = False
+                st.session_state.scanner_iteracao += 1
+                desligar_cameras_android()
         else:
             desligar_cameras_android()
-            if st.session_state.codigo_atual is None:
-                if st.button("📷 Ligar Câmera para Bipar Novo Item", use_container_width=True):
-                    st.session_state.scanner_ativo = True
-                    st.session_state.scanner_iteracao += 1
-                    st.rerun()
+            if st.button("🔄 Ler Outro Código de Barras", use_container_width=True):
+                st.session_state.aviso_duplicado = None
+                st.session_state.ultimo_codigo_scanner = None
+                resetar_para_proximo_item()
+                st.rerun()
     else:
         desligar_cameras_android()
         with st.form("form_busca_manual", clear_on_submit=True):
@@ -175,15 +198,11 @@ def renderizar_aba_coleta():
                 f" com saldo **{item_ex['Qtd Física']}**!"
             )
             st.session_state.codigo_atual = None
-            st.session_state.scanner_ativo = False
-            st.session_state.scanner_iteracao += 1
             st.rerun()
 
         elif ean_bipado != st.session_state.codigo_atual:
             st.session_state.aviso_duplicado = None
             st.session_state.codigo_atual = ean_bipado
-            st.session_state.scanner_ativo = False
-            st.session_state.scanner_iteracao += 1
             st.session_state.modo_foto_inventario = False
             st.session_state.qtd_calculada_ia = 1.0
             with st.spinner("Buscando dados mestres..."):
@@ -194,24 +213,28 @@ def renderizar_aba_coleta():
     if st.session_state.aviso_duplicado:
         st.error(st.session_state.aviso_duplicado)
 
-    # 5. Formulário de confirmação do novo item
+    # 5. Formulário de confirmação do novo item + Painel de captura via câmera nativa
     if st.session_state.codigo_atual:
         st.info(f"**Novo Código Selecionado:** {st.session_state.codigo_atual}")
         info = st.session_state.dados_api
         desc_padrao = info.get("descricao", "")
 
-        # Botão para ativar a contagem por fotos
-        if st.button("📸 Gerar Inventário do Item (Contar por Fotos)", use_container_width=True):
+        if st.button(
+            "📸 Gerar Inventário do Item (Contar por Fotos)",
+            use_container_width=True,
+        ):
             st.session_state.modo_foto_inventario = not st.session_state.modo_foto_inventario
-            st.session_state.scanner_ativo = False
-            st.rerun()
+            if st.session_state.modo_foto_inventario:
+                desligar_cameras_android()
 
         # Painel de captura via câmera nativa do Android (Resistente a reload)
         if st.session_state.modo_foto_inventario:
             desligar_cameras_android()
             with st.container(border=True):
                 st.markdown("#### Contagem Visual do Estoque")
-                st.caption("Tire uma foto por vez ou selecione várias fotos da galeria.")
+                st.caption(
+                    "Toque abaixo para abrir a câmera ou selecionar fotos da galeria."
+                )
 
                 fotos_selecionadas = st.file_uploader(
                     "📷 Abrir Câmera ou Galeria",
@@ -228,16 +251,27 @@ def renderizar_aba_coleta():
                     for idx, f_img in enumerate(fotos_selecionadas[:3]):
                         cols_prev[idx].image(f_img, use_container_width=True)
 
-                    if st.button("✅ Contar Itens nas Fotos Agora", type="primary", use_container_width=True):
+                    if st.button(
+                        "✅ Contar Itens nas Fotos Agora",
+                        type="primary",
+                        use_container_width=True,
+                    ):
                         with st.spinner(f"Analisando {qtd_fotos} foto(s) com Gemini..."):
-                            nome_busca = desc_padrao if desc_padrao else st.session_state.codigo_atual
-                            total = contar_itens_nas_fotos(fotos_selecionadas, nome_busca)
+                            nome_busca = (
+                                desc_padrao
+                                if desc_padrao
+                                else st.session_state.codigo_atual
+                            )
+                            total = contar_itens_nas_fotos(
+                                fotos_selecionadas, nome_busca
+                            )
                             if total is not None:
                                 st.session_state.qtd_calculada_ia = float(total)
                                 st.session_state.modo_foto_inventario = False
+                                st.success(f"Contagem concluída: **{total}** unidades!")
                                 st.rerun()
 
-        # Formulário principal (preenchido com o resultado da IA, mas editável manualmente)
+        # Formulário principal (editável antes de salvar)
         with st.form("form_estoque", clear_on_submit=True):
             descricao = st.text_input("Descrição", value=desc_padrao)
             c1, c2, c3 = st.columns(3)
@@ -259,11 +293,13 @@ def renderizar_aba_coleta():
                     "Marca": marca,
                     "Qtd Física": quantidade,
                 }
-                resetar_para_nova_leitura()
+                st.session_state.ultimo_codigo_scanner = None
+                resetar_para_proximo_item()
                 st.rerun()
 
             if b2.form_submit_button("Cancelar", use_container_width=True):
-                resetar_para_nova_leitura()
+                st.session_state.ultimo_codigo_scanner = None
+                resetar_para_proximo_item()
                 st.rerun()
 
     # 6. Tabela dos itens já salvos + Exportação CSV
